@@ -182,12 +182,15 @@ export class ExposureNotificationService {
   async fetchAndSubmitKeys(): Promise<void> {
     const submissionKeysStr = await this.secureStorage.get(SUBMISSION_AUTH_KEYS);
     if (!submissionKeysStr) {
-      throw new Error('No Upload keys found, did you forget to claim one-time code?');
+      captureMessage('No upload certificate found');
+      throw new Error('No upload certificate found');
     }
     const auth = JSON.parse(submissionKeysStr) as SubmissionKeySet;
     const diagnosisKeys = await this.exposureNotification.getTemporaryExposureKeyHistory();
     if (diagnosisKeys.length > 0) {
       await this.backendInterface.reportDiagnosisKeys(auth, diagnosisKeys);
+    } else {
+      captureMessage('There are no keys found to upload');
     }
     await this.recordKeySubmission();
   }
