@@ -2,19 +2,20 @@ import ExposureNotification, {
   ExposureSummary,
   Status as SystemStatus,
   ExposureConfiguration,
+  TemporaryExposureKey,
 } from 'bridge/ExposureNotification';
 import PushNotification from 'bridge/PushNotification';
-import {addDays, periodSinceEpoch, minutesBetween, getCurrentDate, daysBetweenUTC, daysBetween} from 'shared/date-fns';
-import {I18n} from 'locale';
-import {Observable, MapObservable} from 'shared/Observable';
-import {captureException, captureMessage} from 'shared/log';
-import {Platform} from 'react-native';
+import { addDays, periodSinceEpoch, minutesBetween, getCurrentDate, daysBetweenUTC, daysBetween } from 'shared/date-fns';
+import { I18n } from 'locale';
+import { Observable, MapObservable } from 'shared/Observable';
+import { captureException, captureMessage } from 'shared/log';
+import { Platform } from 'react-native';
 
-import {BackendInterface, SubmissionKeySet} from '../BackendService';
+import { BackendInterface, SubmissionKeySet } from '../BackendService';
 
 import exposureConfigurationDefault from './ExposureConfigurationDefault.json';
 import exposureConfigurationSchema from './ExposureConfigurationSchema.json';
-import {ExposureConfigurationValidator, ExposureConfigurationValidationError} from './ExposureConfigurationValidator';
+import { ExposureConfigurationValidator, ExposureConfigurationValidationError } from './ExposureConfigurationValidator';
 
 const SUBMISSION_AUTH_KEYS = 'submissionAuthKeys';
 const EXPOSURE_CONFIGURATION = 'exposureConfiguration';
@@ -27,37 +28,39 @@ export const EXPOSURE_NOTIFICATION_CYCLE = 14;
 
 export const MINIMUM_REMINDER_INTERVAL_MINUTES = 180;
 
-export {SystemStatus};
+export const cannotGetTEKsError = new Error('Unable to retrieve TEKs');
+
+export { SystemStatus };
 
 export type ExposureStatus =
   | {
-      type: 'monitoring';
-      lastChecked?: {
-        period: number;
-        timestamp: number;
-      };
-    }
-  | {
-      type: 'exposed';
-      summary: ExposureSummary;
-      notificationSent?: boolean;
-      lastChecked?: {
-        period: number;
-        timestamp: number;
-      };
-    }
-  | {
-      type: 'diagnosed';
-      needsSubmission: boolean;
-      submissionLastCompletedAt?: number;
-      uploadReminderLastSentAt?: number;
-      cycleStartsAt: number;
-      cycleEndsAt: number;
-      lastChecked?: {
-        period: number;
-        timestamp: number;
-      };
+    type: 'monitoring';
+    lastChecked?: {
+      period: number;
+      timestamp: number;
     };
+  }
+  | {
+    type: 'exposed';
+    summary: ExposureSummary;
+    notificationSent?: boolean;
+    lastChecked?: {
+      period: number;
+      timestamp: number;
+    };
+  }
+  | {
+    type: 'diagnosed';
+    needsSubmission: boolean;
+    submissionLastCompletedAt?: number;
+    uploadReminderLastSentAt?: number;
+    cycleStartsAt: number;
+    cycleEndsAt: number;
+    lastChecked?: {
+      period: number;
+      timestamp: number;
+    };
+  };
 
 export interface PersistencyProvider {
   setItem(key: string, value: string): Promise<void>;
@@ -103,7 +106,7 @@ export class ExposureNotificationService {
     this.i18n = i18n;
     this.exposureNotification = exposureNotification;
     this.systemStatus = new Observable<SystemStatus>(SystemStatus.Undefined);
-    this.exposureStatus = new MapObservable<ExposureStatus>({type: 'monitoring'});
+    this.exposureStatus = new MapObservable<ExposureStatus>({ type: 'monitoring' });
     this.backendInterface = backendInterface;
     this.storage = storage;
     this.secureStorage = secureStorage;
@@ -141,12 +144,10 @@ export class ExposureNotificationService {
   async updateExposureStatusInBackground() {
     await this.init();
     try {
-      captureMessage('updateExposureStatusInBackground', {exposureStatus: this.exposureStatus.get()});
-      await this.processPendingExposureSummary();
-      await this.processNotification();
+      captureMessage('updateExposureStatusInBackground', { exposureStatus: this.exposureStatus.get() });
       await this.updateExposureStatus();
       await this.processNotification();
-      captureMessage('updatedExposureStatusInBackground', {exposureStatus: this.exposureStatus.get()});
+      captureMessage('updatedExposureStatusInBackground', { exposureStatus: this.exposureStatus.get() });
     } catch (error) {
       captureException('updateExposureStatusInBackground', error);
     }
@@ -182,22 +183,26 @@ export class ExposureNotificationService {
   async fetchAndSubmitKeys(): Promise<void> {
     const submissionKeysStr = await this.secureStorage.get(SUBMISSION_AUTH_KEYS);
     if (!submissionKeysStr) {
-      captureMessage('No upload certificate found');
-      throw new Error('No upload certificate found');
+      throw new Error('Submission keys: bad certificate');
     }
     const auth = JSON.parse(submissionKeysStr) as SubmissionKeySet;
-    const diagnosisKeys = await this.exposureNotification.getTemporaryExposureKeyHistory();
-    if (diagnosisKeys.length > 0) {
-      await this.backendInterface.reportDiagnosisKeys(auth, diagnosisKeys);
+    let temporaryExposureKeys: TemporaryExposureKey[];
+    try {
+      temporaryExposureKeys = await this.exposureNotification.getTemporaryExposureKeyHistory();
+    } catch {
+      throw cannotGetTEKsError;
+    }
+    if (temporaryExposureKeys.length > 0) {
+      await this.backendInterface.reportDiagnosisKeys(auth, temporaryExposureKeys);
     } else {
-      captureMessage('There are no keys found to upload');
+      captureMessage('No TEKs available to upload');
     }
     await this.recordKeySubmission();
   }
 
   private async init() {
     const exposureStatus = JSON.parse((await this.storage.getItem(EXPOSURE_STATUS)) || 'null');
-    this.exposureStatus.append({...exposureStatus});
+    this.exposureStatus.append({ ...exposureStatus });
   }
 
   /**
@@ -222,7 +227,7 @@ export class ExposureNotificationService {
   private async recordKeySubmission() {
     const currentStatus = this.exposureStatus.get();
     if (currentStatus.type !== 'diagnosed') return;
-    this.exposureStatus.append({needsSubmission: false, submissionLastCompletedAt: getCurrentDate().getTime()});
+    this.exposureStatus.append({ needsSubmission: false, submissionLastCompletedAt: getCurrentDate().getTime() });
   }
 
   private async calculateNeedsSubmission(): Promise<boolean> {
@@ -248,14 +253,14 @@ export class ExposureNotificationService {
 
   private async *keysSinceLastFetch(
     _lastCheckedPeriod?: number,
-  ): AsyncGenerator<{keysFileUrl: string; period: number} | null> {
+  ): AsyncGenerator<{ keysFileUrl: string; period: number } | null> {
     const runningDate = getCurrentDate();
     let runningPeriod = periodSinceEpoch(runningDate, HOURS_PER_PERIOD);
 
     if (!_lastCheckedPeriod) {
       try {
         const keysFileUrl = await this.backendInterface.retrieveDiagnosisKeys(0);
-        yield {keysFileUrl, period: runningPeriod};
+        yield { keysFileUrl, period: runningPeriod };
       } catch (error) {
         captureException('Error while downloading batch files', error);
       }
@@ -268,7 +273,7 @@ export class ExposureNotificationService {
       try {
         const keysFileUrl = await this.backendInterface.retrieveDiagnosisKeys(runningPeriod);
         const period = runningPeriod;
-        yield {keysFileUrl, period};
+        yield { keysFileUrl, period };
       } catch (error) {
         captureException('Error while downloading key file', error);
       }
@@ -278,6 +283,11 @@ export class ExposureNotificationService {
   }
 
   private async performExposureStatusUpdate(): Promise<void> {
+    const hasPendingExposureSummary = await this.processPendingExposureSummary();
+    if (hasPendingExposureSummary) {
+      return;
+    }
+
     let exposureConfiguration: ExposureConfiguration;
     try {
       exposureConfiguration = await this.backendInterface.getExposureConfiguration();
@@ -333,15 +343,15 @@ export class ExposureNotificationService {
       // Let's use device timezone for resetting exposureStatus for now
       // Ref https://github.com/cds-snc/covid-shield-mobile/issues/676
       if (daysBetween(today, cycleEndsAt) <= 0) {
-        this.exposureStatus.set({type: 'monitoring', lastChecked: currentStatus.lastChecked});
+        this.exposureStatus.set({ type: 'monitoring', lastChecked: currentStatus.lastChecked });
         return finalize();
       }
-      return finalize({needsSubmission: await this.calculateNeedsSubmission()});
+      return finalize({ needsSubmission: await this.calculateNeedsSubmission() });
     } else if (currentStatus.type === 'exposed') {
       const today = getCurrentDate();
       const lastExposureAt = new Date(currentStatus.summary.lastExposureTimestamp || today.getTime());
       if (daysBetween(lastExposureAt, today) >= EXPOSURE_NOTIFICATION_CYCLE) {
-        this.exposureStatus.set({type: 'monitoring', lastChecked: currentStatus.lastChecked});
+        this.exposureStatus.set({ type: 'monitoring', lastChecked: currentStatus.lastChecked });
         return finalize();
       }
     }
@@ -350,10 +360,10 @@ export class ExposureNotificationService {
     const generator = this.keysSinceLastFetch(currentStatus.lastChecked?.period);
     let lastCheckedPeriod = currentStatus.lastChecked?.period;
     while (true) {
-      const {value, done} = await generator.next();
+      const { value, done } = await generator.next();
       if (done) break;
       if (!value) continue;
-      const {keysFileUrl, period} = value;
+      const { keysFileUrl, period } = value;
       keysFileUrls.push(keysFileUrl);
       lastCheckedPeriod = Math.max(lastCheckedPeriod || 0, period);
     }
@@ -365,9 +375,9 @@ export class ExposureNotificationService {
     });
 
     try {
-      const {minimumExposureDurationMinutes} = exposureConfiguration;
+      const { minimumExposureDurationMinutes } = exposureConfiguration;
       const summary = await this.exposureNotification.detectExposure(exposureConfiguration, keysFileUrls);
-      captureMessage('summary', {summary});
+      captureMessage('summary', { summary });
       // on ios attenuationDurations is in seconds, on android it is in minutes
       const divisor = Platform.OS === 'ios' ? 60 : 1;
       const durationAtImmediateMinutes = summary.attenuationDurations[0] / divisor;
@@ -392,9 +402,12 @@ export class ExposureNotificationService {
 
   private async processPendingExposureSummary() {
     const summary = await this.exposureNotification.getPendingExposureSummary().catch(() => undefined);
+    if (!summary) {
+      return false;
+    }
     const exposureStatus = this.exposureStatus.get();
     if (exposureStatus.type === 'diagnosed' || !summary || summary.matchedKeyCount <= 0) {
-      return;
+      return true;
     }
     const today = getCurrentDate();
     this.exposureStatus.append({
@@ -405,6 +418,7 @@ export class ExposureNotificationService {
         period: periodSinceEpoch(today, HOURS_PER_PERIOD),
       },
     });
+    return true;
   }
 
   private selectExposureSummary(nextSummary: ExposureSummary): ExposureSummary {
@@ -431,7 +445,7 @@ export class ExposureNotificationService {
       exposureStatus.needsSubmission &&
       (!exposureStatus.uploadReminderLastSentAt ||
         minutesBetween(new Date(exposureStatus.uploadReminderLastSentAt), new Date()) >
-          MINIMUM_REMINDER_INTERVAL_MINUTES)
+        MINIMUM_REMINDER_INTERVAL_MINUTES)
     ) {
       PushNotification.presentLocalNotification({
         alertTitle: this.i18n.translate('Notification.DailyUploadNotificationTitle'),
